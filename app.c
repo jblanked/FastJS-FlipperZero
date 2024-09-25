@@ -261,12 +261,16 @@ static bool fast_js_file_browser_callback(void *context, uint32_t event)
         }
 
         DialogsFileBrowserOptions browser_options;
-        dialog_file_browser_set_basic_options(&browser_options, ".js", NULL);
 
+        browser_options.extension = "js";
+        browser_options.base_path = STORAGE_APP_DATA_PATH_PREFIX;
+        browser_options.skip_assets = true;
+        browser_options.hide_dot_files = true;
+        browser_options.icon = NULL;
         browser_options.hide_ext = false;
-        browser_options.base_path = "/ext"; // Adjust based on where your script files are stored
 
-        FuriString *javascript_file_path = furi_string_alloc();
+        // Show the file browser dialog at the Scripts directory
+        FuriString *javascript_file_path = furi_string_alloc_set_str("/ext/apps/Scripts");
         if (!javascript_file_path)
         {
             furi_record_close(RECORD_DIALOGS);
