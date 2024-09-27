@@ -6,8 +6,6 @@
 #include <gui/view_dispatcher.h>
 #include <gui/modules/submenu.h>
 #include <gui/modules/widget.h>
-#include <gui/modules/text_input.h>
-#include <gui/modules/variable_item_list.h>
 #include <dialogs/dialogs.h>
 #include <storage/storage.h>
 #include <string.h>
@@ -21,18 +19,15 @@
 
 #define TAG "FastJS"
 
-// Define ViewEvent as an alias for uint32_t
-typedef uint32_t ViewEvent;
-
-// Define a custom event ID for file browser
-#define VIEW_EVENT_FILE_BROWSER 1
+// Define custom event IDs
+#define VIEW_EVENT_ADD_SCRIPT 1
 
 // Define the submenu items for our FastJS application
 typedef enum
 {
-    FastJSSubmenuIndexRun,    // The main screen
-    FastJSSubmenuIndexAbout,  // The about screen
-    FastJSSubmenuIndexConfig, // The configuration screen
+    FastJSSubmenuIndexRun,    // Execute scripts in playlist
+    FastJSSubmenuIndexAbout,  // Show the about view
+    FastJSSubmenuIndexConfig, // Open the configuration view
 } FastJSSubmenuIndex;
 
 // Define views for our FastJS application
@@ -41,45 +36,55 @@ typedef enum
     FastJSViewMain,      // The main screen
     FastJSViewSubmenu,   // The menu when the app starts
     FastJSViewAbout,     // The about screen
-    FastJSViewConfigure, // The configuration screen
+    FastJSViewConfigure, // The configuration screen (now shows the playlist)
     FastJSViewConsole,   // Console output view
 } FastJSView;
 
-// Define a structure to hold settings
+// Define a structure to hold settings, including the playlist
+#define MAX_PLAYLIST_SIZE 10
+#define MAX_SCRIPT_PATH_LENGTH 256
+
 typedef struct
 {
-    bool remember_script;
-    char script_path[256]; // Adjust the size as needed
+    char script_path[MAX_SCRIPT_PATH_LENGTH];
+    size_t playlist_count;
+    char playlist[MAX_PLAYLIST_SIZE][MAX_SCRIPT_PATH_LENGTH];
 } SettingsData;
 
-// Forward declaration of FastJSApp for use in FastJSModel
+// Forward declaration of FastJSApp for use in callbacks
 typedef struct FastJSApp FastJSApp;
+
+// Define the ScriptPlaylist structure
+typedef struct
+{
+    char scripts[MAX_PLAYLIST_SIZE][MAX_SCRIPT_PATH_LENGTH];
+    size_t count;
+} ScriptPlaylist;
 
 // Define the application structure
 struct FastJSApp
 {
-    ViewDispatcher *view_dispatcher;             // Switches between our views
-    Submenu *submenu;                            // The application submenu
-    Widget *widget_about;                        // The about screen
-    VariableItemList *variable_item_list_config; // The configuration screen
-    JsConsoleView *console_view;                 // Console output view
+    ViewDispatcher *view_dispatcher; // Switches between our views
+    Submenu *submenu;                // The application submenu
+    Widget *widget_about;            // The about screen
+    Submenu *config_view;            // The configuration screen (now a submenu)
+    JsConsoleView *console_view;     // Console output view
 
-    VariableItem *remember_item;        // Reference to the remember configuration item
-    VariableItem *javascript_file_item; // Reference to the script file configuration item
-
-    bool remember_script;           // Whether to remember the script
     char *selected_javascript_file; // Store the selected script file path
     char *temp_buffer;              // Temporary buffer
     uint32_t temp_buffer_size;      // Size of the temporary buffer
+
+    ScriptPlaylist playlist; // Script playlist
 
     JsThread *js_thread; // JavaScript execution thread
     Gui *gui;            // GUI reference
 };
 
-// Path to save the remembered script file path
+// Path to save the settings
 #define REMEMBERED_SCRIPT_PATH STORAGE_EXT_PATH_PREFIX "/apps_data/fast_js_app/settings.bin"
 
-static void save_settings(bool remember_script, const char *script_path)
+// Function to save settings, including the playlist
+static void save_settings(const char *script_path, const ScriptPlaylist *playlist)
 {
     // Create the directory for saving settings
     char directory_path[256];
@@ -99,27 +104,48 @@ static void save_settings(bool remember_script, const char *script_path)
         return;
     }
 
-    // Write the remember_script as a single byte
-    uint8_t remember_script_byte = remember_script ? 1 : 0;
-    if (storage_file_write(file, &remember_script_byte, sizeof(uint8_t)) != sizeof(uint8_t))
+    // Write the length of script_path
+    size_t script_path_length = strlen(script_path) + 1; // Include null terminator
+    if (storage_file_write(file, &script_path_length, sizeof(size_t)) != sizeof(size_t))
     {
-        FURI_LOG_E(TAG, "Failed to write remember_script");
+        FURI_LOG_E(TAG, "Failed to write script_path_length");
     }
 
-    // Write the script_path as a null-terminated string
-    size_t script_path_length = strlen(script_path) + 1; // Include null terminator
+    // Write the script_path
     if (storage_file_write(file, script_path, script_path_length) != script_path_length)
     {
         FURI_LOG_E(TAG, "Failed to write script_path");
     }
+
+    // Write the playlist count
+    if (storage_file_write(file, &playlist->count, sizeof(size_t)) != sizeof(size_t))
+    {
+        FURI_LOG_E(TAG, "Failed to write playlist count");
+    }
+
+    // Write each playlist script with its length
+    for (size_t i = 0; i < playlist->count; ++i)
+    {
+        size_t script_length = strlen(playlist->scripts[i]) + 1; // Include null terminator
+        if (storage_file_write(file, &script_length, sizeof(size_t)) != sizeof(size_t))
+        {
+            FURI_LOG_E(TAG, "Failed to write script length for script %zu", i);
+        }
+        if (storage_file_write(file, playlist->scripts[i], script_length) != script_length)
+        {
+            FURI_LOG_E(TAG, "Failed to write playlist script %zu", i);
+        }
+    }
+
+    FURI_LOG_I(TAG, "Settings saved: script_path=%s, playlist_count=%zu", script_path, playlist->count);
 
     storage_file_close(file);
     storage_file_free(file);
     furi_record_close(RECORD_STORAGE);
 }
 
-// In load_settings
-static bool load_settings(bool *remember_script, char *buffer, size_t buffer_size)
+// Function to load settings, including the playlist
+static bool load_settings(char *buffer, size_t buffer_size, ScriptPlaylist *playlist)
 {
     Storage *storage = furi_record_open(RECORD_STORAGE);
     File *file = storage_file_alloc(storage);
@@ -132,21 +158,29 @@ static bool load_settings(bool *remember_script, char *buffer, size_t buffer_siz
         return false; // Return false if the file does not exist
     }
 
-    // Read the remember_script as a single byte
-    uint8_t remember_script_byte;
-    if (storage_file_read(file, &remember_script_byte, sizeof(uint8_t)) != sizeof(uint8_t))
+    // Read the length of script_path
+    size_t script_path_length;
+    if (storage_file_read(file, &script_path_length, sizeof(size_t)) != sizeof(size_t))
     {
-        FURI_LOG_E(TAG, "Failed to read remember_script");
+        FURI_LOG_E(TAG, "Failed to read script_path_length");
         storage_file_close(file);
         storage_file_free(file);
         furi_record_close(RECORD_STORAGE);
         return false;
     }
-    *remember_script = remember_script_byte ? true : false;
 
-    // Read the script_path as a null-terminated string
-    ssize_t read_size = storage_file_read(file, buffer, buffer_size - 1);
-    if (read_size <= 0)
+    // Check if script_path_length fits in buffer_size
+    if (script_path_length > buffer_size)
+    {
+        FURI_LOG_E(TAG, "script_path_length exceeds buffer size");
+        storage_file_close(file);
+        storage_file_free(file);
+        furi_record_close(RECORD_STORAGE);
+        return false;
+    }
+
+    // Read the script_path
+    if (storage_file_read(file, buffer, script_path_length) != script_path_length)
     {
         FURI_LOG_E(TAG, "Failed to read script_path");
         storage_file_close(file);
@@ -154,7 +188,69 @@ static bool load_settings(bool *remember_script, char *buffer, size_t buffer_siz
         furi_record_close(RECORD_STORAGE);
         return false;
     }
-    buffer[read_size] = '\0'; // Ensure null-termination
+
+    // Ensure null-termination
+    buffer[script_path_length - 1] = '\0';
+
+    // Read the playlist count
+    if (storage_file_read(file, &playlist->count, sizeof(size_t)) != sizeof(size_t))
+    {
+        FURI_LOG_E(TAG, "Failed to read playlist count");
+        storage_file_close(file);
+        storage_file_free(file);
+        furi_record_close(RECORD_STORAGE);
+        return false;
+    }
+
+    // Ensure the playlist count does not exceed maximum
+    if (playlist->count > MAX_PLAYLIST_SIZE)
+    {
+        FURI_LOG_E(TAG, "Playlist count exceeds maximum allowed. Truncating to %d.", MAX_PLAYLIST_SIZE);
+        playlist->count = MAX_PLAYLIST_SIZE;
+    }
+
+    // Read each playlist script with its length
+    for (size_t i = 0; i < playlist->count; ++i)
+    {
+        size_t script_length;
+        if (storage_file_read(file, &script_length, sizeof(size_t)) != sizeof(size_t))
+        {
+            FURI_LOG_E(TAG, "Failed to read script length for script %zu", i);
+            storage_file_close(file);
+            storage_file_free(file);
+            furi_record_close(RECORD_STORAGE);
+            return false;
+        }
+
+        if (script_length > MAX_SCRIPT_PATH_LENGTH)
+        {
+            FURI_LOG_E(TAG, "Script length exceeds maximum allowed for script %zu", i);
+            storage_file_close(file);
+            storage_file_free(file);
+            furi_record_close(RECORD_STORAGE);
+            return false;
+        }
+
+        if (storage_file_read(file, playlist->scripts[i], script_length) != script_length)
+        {
+            FURI_LOG_E(TAG, "Failed to read playlist script %zu", i);
+            storage_file_close(file);
+            storage_file_free(file);
+            furi_record_close(RECORD_STORAGE);
+            return false;
+        }
+
+        // Ensure null-termination
+        playlist->scripts[i][script_length - 1] = '\0';
+    }
+
+    FURI_LOG_I(TAG, "Settings loaded: script_path=%s, playlist_count=%zu", buffer, playlist->count);
+
+    // Log all loaded scripts for verification
+    for (size_t i = 0; i < playlist->count; ++i)
+    {
+        FURI_LOG_I(TAG, "Loaded script[%zu]: %s", i, playlist->scripts[i]);
+    }
 
     storage_file_close(file);
     storage_file_free(file);
@@ -162,21 +258,19 @@ static bool load_settings(bool *remember_script, char *buffer, size_t buffer_siz
     return true;
 }
 
-// In fast_js_navigation_configure_callback
+// Navigation callbacks
 static uint32_t fast_js_navigation_configure_callback(void *context)
 {
     UNUSED(context);
     return FastJSViewSubmenu;
 }
 
-// Navigation callback for the About screen to go back to the submenu
 static uint32_t fast_js_navigation_about_callback(void *context)
 {
     UNUSED(context);
     return FastJSViewSubmenu;
 }
 
-// Navigation callback for exiting the application from the submenu
 static uint32_t fast_js_submenu_exit_callback(void *context)
 {
     // Exit the application
@@ -247,12 +341,61 @@ static uint32_t fast_js_navigation_console_callback(void *context)
     return FastJSViewSubmenu;
 }
 
-// Custom event callback to handle file browser dialog
-static bool fast_js_file_browser_callback(void *context, uint32_t event)
+// Callback function for configuration item selection
+static void playlist_item_callback(void *context, uint32_t index)
 {
-    if (event == VIEW_EVENT_FILE_BROWSER)
+    FastJSApp *app = (FastJSApp *)context;
+    if (index < app->playlist.count)
     {
-        FastJSApp *app = (FastJSApp *)context;
+        // Remove the script from the playlist
+        for (size_t i = index; i < app->playlist.count - 1; ++i)
+        {
+            strcpy(app->playlist.scripts[i], app->playlist.scripts[i + 1]);
+        }
+        app->playlist.count--;
+
+        // Update the config view
+        submenu_reset(app->config_view);
+
+        // Re-add the playlist items
+        for (size_t i = 0; i < app->playlist.count; ++i)
+        {
+            submenu_add_item(
+                app->config_view,
+                app->playlist.scripts[i],
+                i,
+                playlist_item_callback,
+                app);
+        }
+
+        // Re-add the "Add Script" option
+        submenu_add_item(
+            app->config_view,
+            "Add Script",
+            MAX_PLAYLIST_SIZE,
+            playlist_item_callback,
+            app);
+
+        // Save settings
+        save_settings(app->selected_javascript_file, &app->playlist);
+
+        console_view_print(app->console_view, "Script removed from playlist.");
+    }
+    else if (index == MAX_PLAYLIST_SIZE)
+    {
+        // "Add Script" selected
+        view_dispatcher_send_custom_event(app->view_dispatcher, VIEW_EVENT_ADD_SCRIPT);
+    }
+}
+
+// Custom event callback to handle file browser dialog for adding scripts
+static bool fast_js_custom_event_callback(void *context, uint32_t event)
+{
+    FastJSApp *app = (FastJSApp *)context;
+
+    if (event == VIEW_EVENT_ADD_SCRIPT)
+    {
+        // Open file browser to select a script to add to the playlist
 
         DialogsApp *dialogs = furi_record_open(RECORD_DIALOGS);
         if (!dialogs)
@@ -261,6 +404,7 @@ static bool fast_js_file_browser_callback(void *context, uint32_t event)
         }
 
         DialogsFileBrowserOptions browser_options;
+        dialog_file_browser_set_basic_options(&browser_options, ".js", NULL);
 
         browser_options.extension = "js";
         browser_options.base_path = STORAGE_APP_DATA_PATH_PREFIX;
@@ -269,7 +413,6 @@ static bool fast_js_file_browser_callback(void *context, uint32_t event)
         browser_options.icon = NULL;
         browser_options.hide_ext = false;
 
-        // Show the file browser dialog at the Scripts directory
         FuriString *javascript_file_path = furi_string_alloc_set_str("/ext/apps/Scripts");
         if (!javascript_file_path)
         {
@@ -281,24 +424,45 @@ static bool fast_js_file_browser_callback(void *context, uint32_t event)
         {
             // Store the selected script file path
             const char *file_path = furi_string_get_cstr(javascript_file_path);
-            strncpy(app->selected_javascript_file, file_path, app->temp_buffer_size);
-            app->selected_javascript_file[app->temp_buffer_size - 1] = '\0'; // Ensure null-termination
 
-            // Update the script file item text
-            if (app->javascript_file_item)
+            // Check if playlist is full
+            if (app->playlist.count >= MAX_PLAYLIST_SIZE)
             {
-                variable_item_set_current_value_text(app->javascript_file_item, app->selected_javascript_file);
-            }
-
-            // Save the settings if "Remember" is YES
-            if (app->remember_script)
-            {
-                save_settings(app->remember_script, app->selected_javascript_file);
+                console_view_print(app->console_view, "Playlist is full.");
             }
             else
             {
-                // Save the settings only if "Remember" is NO
-                save_settings(app->remember_script, "");
+                // Add the script to the playlist
+                strncpy(app->playlist.scripts[app->playlist.count], file_path, MAX_SCRIPT_PATH_LENGTH);
+                app->playlist.scripts[app->playlist.count][MAX_SCRIPT_PATH_LENGTH - 1] = '\0'; // Ensure null-termination
+                app->playlist.count++;
+
+                // Update the config view
+                submenu_reset(app->config_view);
+
+                // Re-add the playlist items
+                for (size_t i = 0; i < app->playlist.count; ++i)
+                {
+                    submenu_add_item(
+                        app->config_view,
+                        app->playlist.scripts[i],
+                        i,
+                        playlist_item_callback,
+                        app);
+                }
+
+                // Re-add the "Add Script" option
+                submenu_add_item(
+                    app->config_view,
+                    "Add Script",
+                    MAX_PLAYLIST_SIZE,
+                    playlist_item_callback,
+                    app);
+
+                // Save the updated playlist
+                save_settings(app->selected_javascript_file, &app->playlist);
+
+                console_view_print(app->console_view, "Script added to playlist.");
             }
         }
 
@@ -314,6 +478,26 @@ static bool fast_js_file_browser_callback(void *context, uint32_t event)
     return false; // Event not handled
 }
 
+// Function to execute a single script
+static void execute_script(FastJSApp *app, const char *script_path)
+{
+    FuriString *name = furi_string_alloc();
+    FuriString *script_path_str = furi_string_alloc_set(script_path);
+    path_extract_filename(script_path_str, name, false);
+    FuriString *start_text = furi_string_alloc_printf("Running %s", furi_string_get_cstr(name));
+    console_view_print(app->console_view, furi_string_get_cstr(start_text));
+    console_view_print(app->console_view, "------------");
+    furi_string_free(name);
+    furi_string_free(start_text);
+
+    app->js_thread = js_thread_run(furi_string_get_cstr(script_path_str), js_callback, app);
+    furi_string_free(script_path_str);
+
+    // Wait for the script to finish if needed
+    // You might need to implement waiting logic here
+}
+
+// Handle submenu item selection
 // Handle submenu item selection
 static void fast_js_submenu_callback(void *context, uint32_t index)
 {
@@ -321,27 +505,21 @@ static void fast_js_submenu_callback(void *context, uint32_t index)
     switch (index)
     {
     case FastJSSubmenuIndexRun:
-        // Execute the script
-        if (app->selected_javascript_file[0] == '\0')
+        // Execute all scripts in the playlist
+        if (app->playlist.count == 0)
         {
-            console_view_print(app->console_view, "No script file selected.");
+            console_view_print(app->console_view, "No scripts in the playlist.");
         }
         else
         {
-            // Switch to the console view to execute the script file
+            // Switch to the console view
             view_dispatcher_switch_to_view(app->view_dispatcher, FastJSViewConsole);
-            // Start executing the script
-            FuriString *name = furi_string_alloc();
-            FuriString *script_path = furi_string_alloc_set(app->selected_javascript_file);
-            path_extract_filename(script_path, name, false);
-            FuriString *start_text = furi_string_alloc_printf("Running %s", furi_string_get_cstr(name));
-            console_view_print(app->console_view, furi_string_get_cstr(start_text));
-            console_view_print(app->console_view, "------------");
-            furi_string_free(name);
-            furi_string_free(start_text);
 
-            app->js_thread = js_thread_run(furi_string_get_cstr(script_path), js_callback, app);
-            furi_string_free(script_path);
+            // Execute each script sequentially
+            for (size_t i = 0; i < app->playlist.count; ++i)
+            {
+                execute_script(app, app->playlist.scripts[i]);
+            }
         }
         break;
     case FastJSSubmenuIndexAbout:
@@ -355,35 +533,7 @@ static void fast_js_submenu_callback(void *context, uint32_t index)
     }
 }
 
-// Modify the callback for when the Remember option is toggled
-static void fast_js_config_item_selected(void *context, uint32_t index)
-{
-    FastJSApp *app = (FastJSApp *)context;
-    // In fast_js_config_item_selected
-    if (index == 0)
-    {
-        // Toggle Remember option
-        app->remember_script = !app->remember_script;
-        const char *remember_text = app->remember_script ? "YES" : "NO";
-        variable_item_set_current_value_text(app->remember_item, remember_text);
-
-        // Save the settings each time Remember option is changed
-        if (app->remember_script)
-        {
-            save_settings(app->remember_script, app->selected_javascript_file);
-        }
-        else
-        {
-            save_settings(app->remember_script, "");
-        }
-    }
-    else if (index == 1)
-    {
-        // Script file selection
-        view_dispatcher_send_custom_event(app->view_dispatcher, VIEW_EVENT_FILE_BROWSER);
-    }
-}
-
+// Function to allocate and initialize the FastJS application
 static FastJSApp *fast_js_app_alloc()
 {
     FastJSApp *app = (FastJSApp *)malloc(sizeof(FastJSApp));
@@ -392,7 +542,7 @@ static FastJSApp *fast_js_app_alloc()
         return NULL;
     }
 
-    app->temp_buffer_size = 256; // Increased buffer size for longer paths
+    app->temp_buffer_size = MAX_SCRIPT_PATH_LENGTH; // Buffer size for paths
     app->temp_buffer = (char *)malloc(app->temp_buffer_size);
     app->selected_javascript_file = (char *)malloc(app->temp_buffer_size);
 
@@ -407,15 +557,21 @@ static FastJSApp *fast_js_app_alloc()
     // Initialize buffers with empty strings
     app->temp_buffer[0] = '\0';
     app->selected_javascript_file[0] = '\0';
-    app->remember_script = false;
+
+    // Initialize the playlist
+    app->playlist.count = 0;
 
     // Try to load the remembered settings
-    // In fast_js_app_alloc
-    if (!load_settings(&app->remember_script, app->selected_javascript_file, app->temp_buffer_size))
+    if (load_settings(app->selected_javascript_file, app->temp_buffer_size, &app->playlist))
+    {
+        FURI_LOG_I(TAG, "Settings loaded: script_path=%s, playlist_count=%zu", app->selected_javascript_file, app->playlist.count);
+    }
+    else
     {
         FURI_LOG_I(TAG, "No saved settings found; using defaults");
     }
 
+    // Allocate and set up the view dispatcher
     app->view_dispatcher = view_dispatcher_alloc();
     if (!app->view_dispatcher)
     {
@@ -425,47 +581,58 @@ static FastJSApp *fast_js_app_alloc()
         return NULL;
     }
 
+    // Open the GUI and attach the view dispatcher
     app->gui = furi_record_open(RECORD_GUI);
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
 
-    // Set the custom event callback
-    view_dispatcher_set_custom_event_callback(app->view_dispatcher, fast_js_file_browser_callback);
+    // Set the custom event callback for file browsing
+    view_dispatcher_set_custom_event_callback(app->view_dispatcher, fast_js_custom_event_callback);
 
-    // Console view
+    // Initialize the console view
     app->console_view = console_view_alloc();
     view_dispatcher_add_view(app->view_dispatcher, FastJSViewConsole, console_view_get_view(app->console_view));
     view_set_previous_callback(console_view_get_view(app->console_view), fast_js_navigation_console_callback);
     view_set_context(console_view_get_view(app->console_view), app);
 
-    // Submenu view
+    // Initialize the submenu view
     app->submenu = submenu_alloc();
-    submenu_add_item(app->submenu, "Run", FastJSSubmenuIndexRun, fast_js_submenu_callback, app);
+
+    submenu_add_item(app->submenu, "Run Playlist", FastJSSubmenuIndexRun, fast_js_submenu_callback, app);
     submenu_add_item(app->submenu, "About", FastJSSubmenuIndexAbout, fast_js_submenu_callback, app);
-    submenu_add_item(app->submenu, "Configure", FastJSSubmenuIndexConfig, fast_js_submenu_callback, app);
+    submenu_add_item(app->submenu, "Config", FastJSSubmenuIndexConfig, fast_js_submenu_callback, app);
     view_set_previous_callback(submenu_get_view(app->submenu), fast_js_submenu_exit_callback);
     view_dispatcher_add_view(app->view_dispatcher, FastJSViewSubmenu, submenu_get_view(app->submenu));
 
-    // Configuration view
-    app->variable_item_list_config = variable_item_list_alloc();
-    app->remember_item = variable_item_list_add(app->variable_item_list_config, "Remember", 1, NULL, NULL);
-    const char *remember_text = app->remember_script ? "YES" : "NO";
-    variable_item_set_current_value_text(app->remember_item, remember_text);
-    app->javascript_file_item = variable_item_list_add(app->variable_item_list_config, "Select Script File", 1, NULL, NULL);
-    if (app->selected_javascript_file[0] != '\0')
+    // Initialize the configuration view
+    app->config_view = submenu_alloc();
+
+    // Add existing scripts to the submenu, showing only the filename
+    for (size_t i = 0; i < app->playlist.count; ++i)
     {
-        variable_item_set_current_value_text(app->javascript_file_item, app->selected_javascript_file);
-    }
-    else
-    {
-        variable_item_set_current_value_text(app->javascript_file_item, "Not selected");
+        FuriString *filename = furi_string_alloc_set(app->playlist.scripts[i]);
+        path_extract_filename(filename, filename, false); // Extract filename from path
+        submenu_add_item(
+            app->config_view,
+            furi_string_get_cstr(filename), // Use only the filename
+            i,
+            playlist_item_callback,
+            app);
+        furi_string_free(filename); // Free the filename string after use
     }
 
-    variable_item_list_set_enter_callback(app->variable_item_list_config, fast_js_config_item_selected, app);
-    view_set_previous_callback(variable_item_list_get_view(app->variable_item_list_config), fast_js_navigation_configure_callback);
-    view_dispatcher_add_view(app->view_dispatcher, FastJSViewConfigure, variable_item_list_get_view(app->variable_item_list_config));
+    // Add "Add Script" option
+    submenu_add_item(
+        app->config_view,
+        "Add Script",
+        MAX_PLAYLIST_SIZE,
+        playlist_item_callback,
+        app);
 
-    // About view
+    view_set_previous_callback(submenu_get_view(app->config_view), fast_js_navigation_configure_callback);
+    view_dispatcher_add_view(app->view_dispatcher, FastJSViewConfigure, submenu_get_view(app->config_view));
+
+    // Initialize the about view
     app->widget_about = widget_alloc();
     widget_add_text_scroll_element(
         app->widget_about,
@@ -473,7 +640,7 @@ static FastJSApp *fast_js_app_alloc()
         0,
         128,
         64,
-        "FastJS App\n---\nExecute your scripts seamlessly.\n---\nPress BACK to return.");
+        "FastJS App\n---\nExecute your scripts\nseamlessly. Manage your\nplaylist in the config menu.\n---\nPress BACK to return.");
     view_set_previous_callback(widget_get_view(app->widget_about), fast_js_navigation_about_callback);
     view_dispatcher_add_view(app->view_dispatcher, FastJSViewAbout, widget_get_view(app->widget_about));
 
@@ -506,15 +673,15 @@ static void fast_js_app_free(FastJSApp *app)
 
     // Free configuration view
     view_dispatcher_remove_view(app->view_dispatcher, FastJSViewConfigure);
-    variable_item_list_free(app->variable_item_list_config);
-
-    // Free buffers
-    free(app->temp_buffer);
-    free(app->selected_javascript_file);
+    submenu_free(app->config_view);
 
     // Free about view
     view_dispatcher_remove_view(app->view_dispatcher, FastJSViewAbout);
     widget_free(app->widget_about);
+
+    // Free buffers
+    free(app->temp_buffer);
+    free(app->selected_javascript_file);
 
     // Free dispatcher
     view_dispatcher_free(app->view_dispatcher);
