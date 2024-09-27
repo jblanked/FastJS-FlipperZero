@@ -595,7 +595,7 @@ static FastJSApp *fast_js_app_alloc()
 
     // Initialize the submenu view
     app->submenu = submenu_alloc();
-
+    submenu_set_header(app->submenu, "FastJS");
     submenu_add_item(app->submenu, "Run Playlist", FastJSSubmenuIndexRun, fast_js_submenu_callback, app);
     submenu_add_item(app->submenu, "About", FastJSSubmenuIndexAbout, fast_js_submenu_callback, app);
     submenu_add_item(app->submenu, "Config", FastJSSubmenuIndexConfig, fast_js_submenu_callback, app);
@@ -604,7 +604,7 @@ static FastJSApp *fast_js_app_alloc()
 
     // Initialize the configuration view
     app->config_view = submenu_alloc();
-
+    submenu_set_header(app->config_view, "Playlist");
     // Add existing scripts to the submenu, showing only the filename
     for (size_t i = 0; i < app->playlist.count; ++i)
     {
