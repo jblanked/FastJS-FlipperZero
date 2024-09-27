@@ -440,15 +440,18 @@ static bool fast_js_custom_event_callback(void *context, uint32_t event)
                 // Update the config view
                 submenu_reset(app->config_view);
 
-                // Re-add the playlist items
+                // Re-add the playlist items, showing only the filename
                 for (size_t i = 0; i < app->playlist.count; ++i)
                 {
+                    FuriString *filename = furi_string_alloc_set(app->playlist.scripts[i]);
+                    path_extract_filename(filename, filename, false); // Extract filename from path
                     submenu_add_item(
                         app->config_view,
-                        app->playlist.scripts[i],
+                        furi_string_get_cstr(filename), // Use only the filename
                         i,
                         playlist_item_callback,
                         app);
+                    furi_string_free(filename); // Free the filename string after use
                 }
 
                 // Re-add the "Add Script" option
@@ -492,12 +495,8 @@ static void execute_script(FastJSApp *app, const char *script_path)
 
     app->js_thread = js_thread_run(furi_string_get_cstr(script_path_str), js_callback, app);
     furi_string_free(script_path_str);
-
-    // Wait for the script to finish if needed
-    // You might need to implement waiting logic here
 }
 
-// Handle submenu item selection
 // Handle submenu item selection
 static void fast_js_submenu_callback(void *context, uint32_t index)
 {
@@ -532,7 +531,6 @@ static void fast_js_submenu_callback(void *context, uint32_t index)
         break;
     }
 }
-
 // Function to allocate and initialize the FastJS application
 static FastJSApp *fast_js_app_alloc()
 {
