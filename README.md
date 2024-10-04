@@ -10,12 +10,8 @@ FastJS is a user-friendly application designed for the Flipper Zero that allows 
 - **Configuration View**: Users can choose which script to save and whether to remember their selection for future use.
 - **Persistent Settings**: FastJS utilizes the storage library to securely save user preferences, ensuring a seamless experience every time.
 
-**Installation:**
-1. Download from: [FastJS on Flipper Lab](https://lab.flipper.net/apps/fast_js_app)
-
 **Usage:**
 1. Launch FastJS from your Flipper Zero.
 2. Use the configuration view to select your desired JavaScript file.
-3. Choose whether to remember your selection.
-4. (Optional) Go to **Settings** -> **Desktop** and assign FastJS as a Favorite App or Dummy Mode button.
-5. Execute the pre-saved script quickly whenever needed.
+3. (Optional) Go to **Settings** -> **Desktop** and assign FastJS as a Favorite App or Dummy Mode button.
+4. Execute the pre-saved script quickly whenever needed.
