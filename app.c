@@ -14,7 +14,6 @@
 #include <js_thread.h>
 #include <toolbox/path.h>
 #include "js_app_i.h"
-#include <cli/cli.h>
 #include "js_modules.h"
 
 #define TAG "FastJS"
@@ -638,7 +637,7 @@ static FastJSApp *fast_js_app_alloc()
         0,
         128,
         64,
-        "FastJS App\n---\nExecute your scripts\nseamlessly.\n---\nManage your\nplaylist in the config menu.\nYou will click 'Add Script'\nto add a script, or click\nthe script to remove it.\n---\nPress BACK to return.");
+        "FastJS App v1.3\n---\nExecute your scripts\nseamlessly.\n---\nManage your\nplaylist in the config menu.\nYou will click 'Add Script'\nto add a script, or click\nthe script to remove it.\n---\nPress BACK to return.");
     view_set_previous_callback(widget_get_view(app->widget_about), fast_js_navigation_about_callback);
     view_dispatcher_add_view(app->view_dispatcher, FastJSViewAbout, widget_get_view(app->widget_about));
 
